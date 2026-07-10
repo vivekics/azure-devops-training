@@ -1,0 +1,391 @@
+pipeline {
+
+    agent any
+
+
+    tools {
+
+        jdk 'java'
+        maven 'maven'
+    }
+    environment {
+
+        REPO_URL = "https://github.com/vivekics/BG-Azure--devops.git"
+        BRANCH   = "main"
+
+        DOCKER_USER = "teqvivek123"
+        IMAGE_NAME = "teqvivek123/bg-azure-devops"
+        CONTAINER_NAME = "bg-azure-devops"
+        APP_PORT = "8080"
+
+    }
+
+
+    options {
+
+        timestamps()
+
+        disableConcurrentBuilds()
+
+    }
+
+
+
+    stages {
+
+
+
+        stage('Checkout Code') {
+
+
+            steps {
+
+
+                git branch: "${BRANCH}",
+                    url: "${REPO_URL}"
+
+
+            }
+
+        }
+
+
+
+
+        stage('Verify Java & Maven') {
+
+
+            steps {
+
+
+                sh '''
+
+                echo "========== JAVA VERSION =========="
+
+                java -version
+
+
+
+                echo ""
+
+                echo "========== MAVEN VERSION =========="
+
+                mvn -version
+
+
+                '''
+
+
+            }
+
+        }
+
+
+
+
+        stage('Maven Build') {
+
+
+            steps {
+
+
+                sh '''
+
+
+                echo "Starting Maven Build"
+
+
+                mvn clean package -DskipTests
+
+
+
+                echo "Maven Build Completed"
+
+
+
+                '''
+
+            }
+
+        }
+
+
+
+
+
+        stage('Prepare Security Reports') {
+
+
+            steps {
+
+
+                sh '''
+
+
+                echo "Preparing Reports Directory"
+
+
+
+                rm -rf reports
+
+                mkdir -p reports
+
+                chmod -R 777 reports
+
+
+
+                ls -ld reports
+
+
+
+                '''
+
+            }
+
+        }
+
+
+
+
+
+        stage('Gitleaks Secret Scan') {
+
+
+            steps {
+
+
+                sh '''
+
+
+                echo "========== GITLEAKS SCAN =========="
+
+
+
+                docker run --rm \\
+                -v "$(pwd):/repo" \\
+                zricethezav/gitleaks:latest \\
+                detect \\
+                --source=/repo \\
+                --no-git \\
+                --report-format=csv \\
+                --report-path=/repo/gitleaks-report.csv \\
+                --exit-code=0 \\
+                --verbose
+
+
+
+                if [ -f gitleaks-report.csv ]; then
+
+
+                    mv gitleaks-report.csv reports/
+
+
+                else
+
+
+                    echo "No secrets detected" > reports/gitleaks-report.csv
+
+
+                fi
+
+
+
+
+                echo ""
+
+                cat reports/gitleaks-report.csv
+
+
+
+                '''
+
+            }
+
+        }
+
+
+
+
+
+        stage('Trivy Filesystem Scan') {
+
+
+            steps {
+
+
+                sh '''
+
+
+                echo "========== TRIVY FILESYSTEM SCAN =========="
+
+
+
+                docker run --rm \\
+                -v "$(pwd):/src" \\
+                aquasec/trivy:latest \\
+                fs \\
+                --scanners vuln,secret \\
+                --severity HIGH,CRITICAL \\
+                --format table \\
+                --output /src/trivy-report.txt \\
+                /src || true
+
+
+
+
+                if [ -f trivy-report.txt ]; then
+
+
+                    mv trivy-report.txt reports/
+
+
+                else
+
+
+                    echo "No vulnerabilities detected" > reports/trivy-report.txt
+
+
+                fi
+
+
+
+
+                echo ""
+
+                cat reports/trivy-report.txt
+
+
+
+                '''
+
+            }
+
+        }
+
+
+        stage('Docker Build') {
+            steps {
+                sh '''
+                echo "========== DOCKER BUILD =========="
+
+                docker build \\
+                -t ${IMAGE_NAME}:${BUILD_NUMBER} .
+                echo "Docker Image Created"
+
+                docker images | grep bg-azure-devops
+
+                '''
+
+            }
+
+        }
+
+
+
+
+
+
+
+        stage('Docker Login & Push') {
+            steps {
+                withCredentials([usernamePassword(
+
+                    credentialsId: 'dockerhub-creds',
+
+                    usernameVariable: 'DOCKER_USERNAME',
+
+                    passwordVariable: 'DOCKER_TOKEN'
+
+                )]) {
+                    sh '''
+                    echo "========== DOCKER LOGIN =========="
+
+                    echo $DOCKER_TOKEN | docker login \\
+                    -u $DOCKER_USERNAME \\
+                    --password-stdin
+                    echo "Pushing Image"
+
+                    docker push ${IMAGE_NAME}:${BUILD_NUMBER}
+                    echo "Docker Push Completed"
+
+                    docker logout
+
+                    '''
+                }
+            }
+
+        }
+
+        stage('Deploy Container') {
+            steps {
+                sh '''
+                echo "========== DEPLOY CONTAINER =========="
+
+                echo "Stopping existing container"
+
+                docker stop ${CONTAINER_NAME} || true
+                echo "Removing existing container"
+                docker rm ${CONTAINER_NAME} || true
+
+                echo "Pulling latest image"
+                docker pull ${IMAGE_NAME}:${BUILD_NUMBER}
+
+                echo "Starting Application Container"
+
+                docker run -d \\
+                --name ${CONTAINER_NAME} \\
+                -p ${APP_PORT}:8081 \\
+                --restart always \\
+                ${IMAGE_NAME}:${BUILD_NUMBER}
+
+                echo ""
+
+                echo "========== RUNNING CONTAINER =========="
+                docker ps | grep ${CONTAINER_NAME}
+                echo "Deployment Completed"
+
+                '''
+            }
+
+        }
+
+    }
+
+    post {
+
+
+        always {
+
+
+            echo "Publishing Security Reports"
+
+
+
+            archiveArtifacts(
+
+                artifacts: 'reports/**/*',
+
+                allowEmptyArchive: true,
+
+                fingerprint: true
+
+            )
+
+
+        }
+
+
+
+
+        success {
+
+
+            echo "✅ Pipeline Completed Successfully"
+        }
+        failure {
+            echo "❌ Pipeline Failed - Check Reports"
+        }
+    }
+
+
+}
