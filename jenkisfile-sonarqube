@@ -1,0 +1,204 @@
+pipeline {
+
+    agent any
+
+    tools {
+        jdk 'java'
+        maven 'maven'
+    }
+
+    environment {
+        REPO_URL       = "https://github.com/vivekics/BG-Azure--devops.git"
+        BRANCH         = "main"
+
+        DOCKER_USER    = "teqvivek123"
+        IMAGE_NAME     = "teqvivek123/bg-azure-devops"
+        CONTAINER_NAME = "bg-azure-devops"
+        APP_PORT       = "8081"
+
+        SONAR_URL      = "http://15.252.16.206:9000"
+        SONAR_PROJECT  = "bg-azure-devops"
+    }
+
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+    }
+
+
+    stages {
+
+
+        stage('Checkout Code') {
+
+            steps {
+
+                git branch: "${BRANCH}",
+                    url: "${REPO_URL}"
+
+            }
+        }
+
+
+
+        stage('Verify Java & Maven') {
+
+            steps {
+
+                sh '''
+                echo "========== JAVA VERSION =========="
+                java -version
+
+                echo ""
+
+                echo "========== MAVEN VERSION =========="
+                mvn -version
+                '''
+
+            }
+        }
+
+
+
+
+        stage('Maven Build') {
+
+            steps {
+
+                sh '''
+                echo "========== MAVEN BUILD =========="
+
+                mvn clean package -DskipTests
+
+                echo "Maven Build Completed"
+                '''
+
+            }
+        }
+
+
+
+
+        stage('SonarQube Analysis') {
+
+            steps {
+
+                withCredentials([
+                    string(
+                        credentialsId: 'sonar-token',
+                        variable: 'SONAR_TOKEN'
+                    )
+                ]) {
+
+
+                    sh '''
+                    echo "========== SONARQUBE ANALYSIS =========="
+
+
+                    mvn sonar:sonar \
+                    -Dsonar.projectKey=${SONAR_PROJECT} \
+                    -Dsonar.projectName=${SONAR_PROJECT} \
+                    -Dsonar.host.url=${SONAR_URL} \
+                    -Dsonar.token=${SONAR_TOKEN}
+
+
+                    echo "SonarQube Scan Completed"
+
+                    '''
+
+                }
+
+            }
+
+        }
+
+        stage('Docker Build') {
+
+
+            steps {
+
+
+                sh '''
+
+                echo "========== DOCKER BUILD =========="
+
+
+
+                docker build \
+                -t ${IMAGE_NAME}:${BUILD_NUMBER} .
+
+
+
+
+                echo "Docker Image Created"
+
+
+
+                docker images | grep bg-azure-devops
+
+
+
+                '''
+
+            }
+
+        }
+
+
+    }
+
+
+
+
+
+    post {
+
+
+
+        always {
+
+
+            echo "========== ARCHIVING SECURITY REPORTS =========="
+
+
+
+            archiveArtifacts(
+
+                artifacts: 'reports/**/*',
+
+                allowEmptyArchive: true,
+
+                fingerprint: true
+
+            )
+
+        }
+
+
+
+
+        success {
+
+
+            echo "✅ Pipeline Completed Successfully"
+
+
+        }
+
+
+
+
+        failure {
+
+
+            echo "❌ Pipeline Failed - Check Logs and Reports"
+
+
+        }
+
+
+    }
+
+
+}
