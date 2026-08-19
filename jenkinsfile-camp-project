@@ -1,0 +1,240 @@
+pipeline {
+    agent any
+
+    tools {
+        nodejs 'node'
+    }
+
+    environment {
+        GIT_URL      = 'https://github.com/vivekics/3-Tier-Full-Stack-capm-project.git'
+        GIT_BRANCH   = 'main'
+
+        DOCKER_IMAGE = 'f180'
+        DOCKER_TAG   = "${BUILD_NUMBER}"
+
+        DOCKER_CRED  = 'docker-cred'
+
+        CONTAINER_NAME = 'f180-app'
+        APP_PORT       = '3000'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                git branch: "${GIT_BRANCH}",
+                    url: "${GIT_URL}"
+            }
+        }
+
+        stage('Check Node') {
+            steps {
+                sh '''
+                    echo "Node version:"
+                    node --version
+
+                    echo "NPM version:"
+                    npm --version
+                '''
+            }
+        }
+
+        stage('Gitleaks Scan') {
+            steps {
+                echo 'Running Gitleaks scan...'
+
+                script {
+                    def gitleaksStatus = sh(
+                        script: '''
+                            docker run --rm \
+                              -v "$WORKSPACE:/repo" \
+                              zricethezav/gitleaks:latest \
+                              detect \
+                              --source=/repo \
+                              --no-banner \
+                              --exit-code 1
+                        ''',
+                        returnStatus: true
+                    )
+
+                    if (gitleaksStatus == 0) {
+                        echo 'Gitleaks: No leaks found.'
+                    } else {
+                        echo 'WARNING: Gitleaks detected potential secrets.'
+                        echo 'WARNING: Continuing pipeline as configured.'
+                    }
+                }
+            }
+        }
+
+        stage('Trivy FS Scan') {
+            steps {
+                echo 'Running Trivy filesystem scan...'
+
+                script {
+                    def trivyStatus = sh(
+                        script: '''
+                            docker run --rm \
+                              -v "$WORKSPACE:/workspace" \
+                              aquasec/trivy:latest \
+                              fs \
+                              --format table \
+                              --severity HIGH,CRITICAL \
+                              /workspace
+                        ''',
+                        returnStatus: true
+                    )
+
+                    if (trivyStatus == 0) {
+                        echo 'Trivy scan completed.'
+                    } else {
+                        echo 'WARNING: Trivy found HIGH/CRITICAL vulnerabilities.'
+                        echo 'WARNING: Continuing pipeline as configured.'
+                    }
+                }
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                    npm install
+                '''
+            }
+        }
+
+        stage('NPM Scripts') {
+            steps {
+                sh '''
+                    echo "Available npm scripts:"
+                    npm run
+                '''
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh '''
+                    docker build \
+                      -t ${DOCKER_IMAGE}:${DOCKER_TAG} \
+                      -t ${DOCKER_IMAGE}:latest \
+                      .
+                '''
+            }
+        }
+
+        stage('Docker Push') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "${DOCKER_CRED}",
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+
+                        echo "$DOCKER_PASSWORD" | docker login \
+                            -u "$DOCKER_USERNAME" \
+                            --password-stdin
+
+                        docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} \
+                            ${DOCKER_USERNAME}/${DOCKER_IMAGE}:${DOCKER_TAG}
+
+                        docker tag ${DOCKER_IMAGE}:latest \
+                            ${DOCKER_USERNAME}/${DOCKER_IMAGE}:latest
+
+                        docker push \
+                            ${DOCKER_USERNAME}/${DOCKER_IMAGE}:${DOCKER_TAG}
+
+                        docker push \
+                            ${DOCKER_USERNAME}/${DOCKER_IMAGE}:latest
+
+                        docker logout
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                echo "Deploying ${DOCKER_IMAGE}:latest..."
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "${DOCKER_CRED}",
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+
+                        echo "Logging into Docker Hub..."
+
+                        echo "$DOCKER_PASSWORD" | docker login \
+                            -u "$DOCKER_USERNAME" \
+                            --password-stdin
+
+                        echo "Pulling latest image..."
+
+                        docker pull \
+                            ${DOCKER_USERNAME}/${DOCKER_IMAGE}:latest
+
+                        echo "Stopping existing container if running..."
+
+                        docker stop ${CONTAINER_NAME} 2>/dev/null || true
+
+                        echo "Removing existing container..."
+
+                        docker rm ${CONTAINER_NAME} 2>/dev/null || true
+
+                        echo "Starting new container..."
+
+                        docker run -d \
+                            --name ${CONTAINER_NAME} \
+                            -p ${APP_PORT}:3000 \
+                            --restart unless-stopped \
+                            ${DOCKER_USERNAME}/${DOCKER_IMAGE}:latest
+
+                        echo "Logging out from Docker Hub..."
+
+                        docker logout
+
+                        echo "========================================"
+                        echo "Deployment completed"
+                        echo "Container: ${CONTAINER_NAME}"
+                        echo "Port: ${APP_PORT}:3000"
+                        echo "Image: ${DOCKER_USERNAME}/${DOCKER_IMAGE}:latest"
+                        echo "========================================"
+
+                        echo "Container status:"
+                        docker ps --filter "name=${CONTAINER_NAME}"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "========================================"
+            echo "Pipeline completed successfully"
+            echo "Docker Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+            echo "Docker Image: ${DOCKER_IMAGE}:latest"
+            echo "Application Port: ${APP_PORT}"
+            echo "========================================"
+        }
+
+        failure {
+            echo "Pipeline failed. Check the failed stage."
+        }
+
+        always {
+            cleanWs()
+        }
+    }
+}
+
+---------------------------------------------------------------------------
