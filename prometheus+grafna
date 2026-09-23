@@ -1,0 +1,102 @@
+cat > ~/monitoring/prometheus/prometheus.yml <<'EOF'
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+
+  # VM1 CPU / Memory / Disk monitoring
+  - job_name: 'vm1'
+    static_configs:
+      - targets:
+          - '3.110.56.87:9100'
+
+  # VM1 ShopKart website monitoring
+  - job_name: 'shopkart-website'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+
+    static_configs:
+      - targets:
+          - 'http://3.110.56.87'
+
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+
+      - source_labels: [__param_target]
+        target_label: instance
+
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  # Blackbox exporter
+  - job_name: 'blackbox'
+    static_configs:
+      - targets:
+          - 'blackbox:9115'
+EOF
+
+
+
+----blackbox config- 
+
+
+cat > ~/monitoring/blackbox/blackbox.yml <<'EOF'
+modules:
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET
+      preferred_ip_protocol: ip4
+EOF
+
+------------------------------------------------
+docker compose-
+
+
+cat > ~/monitoring/docker-compose.yml <<'EOF'
+services:
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    depends_on:
+      - blackbox
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  blackbox:
+    image: prom/blackbox-exporter:latest
+    container_name: blackbox
+    restart: unless-stopped
+    ports:
+      - "9115:9115"
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    command:
+      - "--config.file=/etc/blackbox_exporter/config.yml"
+
+volumes:
+  prometheus_data:
+  grafana_data:
+EOF
